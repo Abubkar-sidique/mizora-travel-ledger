@@ -1,24 +1,11 @@
-# Financial database
-ledger/data/*.sqlite
-ledger/data/*.sqlite3
-ledger/data/*.db
-ledger/data/*-wal
-ledger/data/*-shm
-
-# Secrets
 .env
 .env.*
-!.env.example
-!.env.*.example
-
-# Backups and release packages
+/data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
 *.sql
-*.sql.gz
-*.dump
-*.bak
-release/
-
-# Local tools
-.vscode/
-vendor/
-node_modules/
+/tests/
+/ops/
+/release/
