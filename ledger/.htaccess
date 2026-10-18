@@ -1,0 +1,17 @@
+Options -Indexes
+DirectoryIndex index.php
+
+<IfModule mod_headers.c>
+    Header always set Strict-Transport-Security "max-age=31536000" "expr=%{HTTPS} == 'on'"
+</IfModule>
+
+# Only index.php is a web entry point. Keep implementation files and the
+# development router inaccessible when the app is hosted on Apache/LiteSpeed.
+<FilesMatch "(?i)^(?!index\.php$).+\.php$">
+    Require all denied
+</FilesMatch>
+
+# Deny private data, source exports, backups, logs, and hidden files.
+<FilesMatch "(?i)(^\.|\.(sqlite|sqlite3|db)(-wal|-shm|-journal)?$|\.(sql|bak|backup|log|md|txt)$)">
+    Require all denied
+</FilesMatch>

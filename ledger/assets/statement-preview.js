@@ -1,0 +1,1 @@
+(function(){'use strict';document.querySelector('[data-print]').addEventListener('click',function(){window.print();});window.addEventListener('load',function(){if(new URLSearchParams(location.search).get('print')==='1')requestAnimationFrame(function(){setTimeout(function(){window.print();},150);});},{once:true});})();

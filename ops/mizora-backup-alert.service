@@ -1,0 +1,6 @@
+[Unit]
+Description=Record MIZORA backup failure for external monitoring
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger -p daemon.err MIZORA_BACKUP_FAILED_check_journal_and_recovery_monitor

@@ -1,0 +1,45 @@
+# Install only after replacing ledger.example.com and certificate paths.
+# This file belongs under nginx's http context (e.g. sites-enabled).
+log_format mizora '$remote_addr [$time_local] "$request_method $uri $server_protocol" '
+                  '$status $body_bytes_sent rt=$request_time';
+server {
+    listen 80;
+    server_name ledger.example.com;
+    location ^~ /.well-known/acme-challenge/ { root /var/lib/letsencrypt; try_files $uri =404; }
+    location / { return 308 https://ledger.example.com$request_uri; }
+}
+server {
+    listen 443 ssl;
+    server_name ledger.example.com;
+    ssl_certificate /etc/letsencrypt/live/ledger.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/ledger.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:MizoraTLS:10m;
+    ssl_session_tickets off;
+    server_tokens off;
+    root /srv/mizora/current/ledger;
+    index index.php;
+    client_max_body_size 64k;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options nosniff always;
+    # No query strings or POST bodies in access logs: filters may contain names/phones.
+    access_log /var/log/nginx/mizora-access.log mizora;
+    error_log /var/log/nginx/mizora-error.log warn;
+    if (-f /srv/mizora/maintenance) { return 503; }
+    location = /index.php {
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root/index.php;
+        fastcgi_param HTTPS on;
+        fastcgi_param REMOTE_ADDR $remote_addr;
+        fastcgi_pass unix:/run/php/mizora.sock;
+        fastcgi_read_timeout 65s;
+        fastcgi_hide_header X-Powered-By;
+    }
+    location ~ ^/assets/(?:(?:app|statement)\.css|(?:app|print|validate|statement-preview)\.js|(?:logo|brand-plane)\.svg|statement-sky\.png)$ { expires 1d; try_files $uri =404; }
+    location /assets/ { return 404; }
+    location ~ (?i)(?:^/\.|^/(?:data|tests|ops|vendor)(?:/|$)|\.(?:php|sqlite|db|bak|sql|log|json)(?:-wal|-shm|-journal)?$) { return 404; }
+    location = / { rewrite ^ /index.php last; }
+    # All application routes use ?p=. Never serve arbitrary public files or backup archives.
+    location / { return 404; }
+    # With a CDN/LB, use ops/trusted-proxy.conf.example only after specifying exact trusted peers.
+}

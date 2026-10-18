@@ -1,0 +1,7 @@
+# Temporary HTTP-only ACME setup. No PHP or financial application is served.
+server {
+    listen 80;
+    server_name ledger.example.com;
+    location ^~ /.well-known/acme-challenge/ { root /var/lib/letsencrypt; try_files $uri =404; }
+    location / { return 503; }
+}

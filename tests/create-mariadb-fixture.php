@@ -1,0 +1,26 @@
+<?php
+declare(strict_types=1);
+if(PHP_SAPI!=='cli'||empty($argv[1])){fwrite(STDERR,"Usage: php create-mariadb-fixture.php NEW_SQLITE_FILE\n");exit(2);}
+$path=$argv[1];if(file_exists($path))throw new RuntimeException('Fixture destination already exists');
+$d=new SQLite3($path,SQLITE3_OPEN_READWRITE|SQLITE3_OPEN_CREATE);$d->exec('PRAGMA foreign_keys=ON');
+function insertFixture(SQLite3Stmt $st,array $values):void{foreach($values as $i=>$v)$st->bindValue($i+1,$v,$v===null?SQLITE3_NULL:(is_int($v)?SQLITE3_INTEGER:SQLITE3_TEXT));$st->execute();}
+$d->exec("CREATE TABLE agencies(id INTEGER PRIMARY KEY,name TEXT NOT NULL,phone TEXT,active INTEGER DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE users(id INTEGER PRIMARY KEY,agency_id INTEGER REFERENCES agencies(id),username TEXT UNIQUE NOT NULL,pass TEXT NOT NULL,role TEXT NOT NULL,fails INTEGER DEFAULT 0,locked_until INTEGER DEFAULT 0,display_name TEXT,phone TEXT,session_version INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE accounts(id INTEGER PRIMARY KEY,agency_id INTEGER NOT NULL REFERENCES agencies(id),name TEXT NOT NULL,phone TEXT,kind TEXT DEFAULT 'customer',opening INTEGER DEFAULT 0,archived INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE entries(id INTEGER PRIMARY KEY,agency_id INTEGER NOT NULL,account_id INTEGER NOT NULL REFERENCES accounts(id),edate TEXT NOT NULL,note TEXT,ref TEXT,debit INTEGER DEFAULT 0,credit INTEGER DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP,reverses_entry_id INTEGER,cat TEXT DEFAULT 'other',deleted INTEGER DEFAULT 0,bill_id INTEGER REFERENCES entries(id),linked_entry_id INTEGER REFERENCES entries(id),request_key TEXT);
+CREATE TABLE audit_log(id INTEGER PRIMARY KEY,agency_id INTEGER,user_id INTEGER,action TEXT NOT NULL,entity TEXT,entity_id INTEGER,details TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE login_limits(key TEXT PRIMARY KEY,attempts INTEGER NOT NULL,until_time INTEGER NOT NULL);
+CREATE TABLE chat_presence(id INTEGER PRIMARY KEY,mode TEXT NOT NULL DEFAULT 'available',last_seen INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE chat_messages(id INTEGER PRIMARY KEY,agency_id INTEGER NOT NULL REFERENCES agencies(id),sender_id INTEGER NOT NULL REFERENCES users(id),from_master INTEGER NOT NULL,body TEXT NOT NULL,request_key TEXT NOT NULL,read_at TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,is_auto INTEGER NOT NULL DEFAULT 0,UNIQUE(sender_id,request_key));
+CREATE TABLE chat_threads(agency_id INTEGER PRIMARY KEY REFERENCES agencies(id),last_id INTEGER NOT NULL DEFAULT 0,unread_master INTEGER NOT NULL DEFAULT 0,unread_agent INTEGER NOT NULL DEFAULT 0,bot_topic TEXT NOT NULL DEFAULT '',bot_count INTEGER NOT NULL DEFAULT 0,last_bot_at INTEGER NOT NULL DEFAULT 0,human_until INTEGER NOT NULL DEFAULT 0,waiting INTEGER NOT NULL DEFAULT 0);
+INSERT INTO agencies(id,name,phone,active) VALUES(1,'Fixture Agency One','+923001112233',1),(2,'Fixture Agency Two','+923004445566',1);");
+$hash=password_hash('Audit-Only-Owner-Password-731',PASSWORD_DEFAULT);
+$u=$d->prepare('INSERT INTO users(id,agency_id,username,pass,role,display_name) VALUES(?,?,?,?,?,?)');foreach([[1,null,'audit.master',$hash,'master','Fixture Master'],[2,1,'audit.owner1',$hash,'owner','Agency One Owner'],[3,2,'audit.owner2',$hash,'owner','Agency Two Owner']] as $r){insertFixture($u,$r);}
+$a=$d->prepare('INSERT INTO accounts(id,agency_id,name,kind,opening) VALUES(?,?,?,?,?)');foreach([[1,1,'Tenant One Account','customer',2500],[2,1,'Second Account','vendor',-500],[3,2,'Tenant Two Secret Account','customer',0],[4,1,'<script>alert(1)</script>','customer',0]] as $r)insertFixture($a,$r);
+$e=$d->prepare('INSERT INTO entries(id,agency_id,account_id,edate,note,ref,debit,credit,cat,deleted,linked_entry_id,request_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)');
+foreach([[1,1,1,'2025-01-01','Original ticket charge','REF-001',10000,0,'ticket_sold',0,null,str_repeat('a',48)],[2,1,1,'2025-01-05','Partial payment','PAY-001',0,4000,'payment_received',0,1,str_repeat('b',48)],[3,1,1,'2025-01-06','Voided test row','VOID-001',300,0,'other_debit',1,null,str_repeat('c',48)],[4,1,2,'2025-02-01','Vendor credit','REF-002',0,1000,'ticket_bought',0,null,str_repeat('d',48)],[5,2,3,'2025-03-01','Tenant two record','SECRET-002',900,0,'ticket_sold',0,null,str_repeat('e',48)]] as $r)insertFixture($e,$r);
+$d->exec("INSERT INTO audit_log(id,agency_id,user_id,action,entity,entity_id,details) VALUES(1,1,2,'create','entry',1,'Migration parity fixture');");
+$rate=hash('sha256','127.0.0.1');$l=$d->prepare('INSERT INTO login_limits(key,attempts,until_time) VALUES(?,?,?)');insertFixture($l,[$rate,2,time()+60]);
+$d->exec("INSERT INTO chat_presence(id,mode,last_seen) VALUES(1,'available',0);");$cm=$d->prepare('INSERT INTO chat_messages(id,agency_id,sender_id,from_master,body,request_key,created_at,is_auto) VALUES(1,1,2,0,?,?,CURRENT_TIMESTAMP,0)');insertFixture($cm,['Fixture support message','fixture-message-0001']);
+$d->exec("INSERT INTO chat_threads(agency_id,last_id,unread_master,unread_agent) VALUES(1,1,1,0);");$d->exec('PRAGMA user_version=7');
+if($d->querySingle('PRAGMA integrity_check')!=='ok')throw new RuntimeException('Bad fixture integrity');if($d->query('PRAGMA foreign_key_check')->fetchArray())throw new RuntimeException('Bad fixture foreign keys');$d->close();echo "PASS disposable MariaDB migration fixture created\n";
