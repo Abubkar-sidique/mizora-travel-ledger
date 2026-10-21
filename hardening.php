@@ -25,7 +25,7 @@ function migrateIntegrity(PDO $p): void {
           SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM accounts WHERE id=NEW.account_id AND agency_id=NEW.agency_id AND archived=0) THEN RAISE(ABORT,'Invalid tenant account') END;
           SELECT CASE WHEN COALESCE(NEW.linked_entry_id,NEW.bill_id) IS NOT NULL AND NOT EXISTS(SELECT 1 FROM entries s WHERE s.id=COALESCE(NEW.linked_entry_id,NEW.bill_id) AND s.agency_id=NEW.agency_id AND s.account_id=NEW.account_id AND s.deleted=0 AND ((NEW.debit>0 AND s.credit>0) OR (NEW.credit>0 AND s.debit>0))) THEN RAISE(ABORT,'Invalid payment reference') END;
           SELECT CASE WHEN NEW.linked_entry_id IS NOT NULL AND NEW.bill_id IS NOT NULL AND NEW.linked_entry_id!=NEW.bill_id THEN RAISE(ABORT,'Conflicting references') END;
-          SELECT CASE WHEN COALESCE(NEW.linked_entry_id,NEW.bill_id) IS NOT NULL AND (NEW.cat NOT IN ('payment_paid','cash_paid','bank_paid','payment_received','cash_received','bank_received') OR EXISTS(SELECT 1 FROM entries WHERE id=COALESCE(NEW.linked_entry_id,NEW.bill_id) AND cat IN ('payment_paid','cash_paid','bank_paid','payment_received','cash_received','bank_received'))) THEN RAISE(ABORT,'Only payments can be allocated to charges') END;
+          SELECT CASE WHEN COALESCE(NEW.linked_entry_id,NEW.bill_id) IS NOT NULL AND (NEW.cat NOT IN ('payment_paid','cash_paid','bank_paid','payment_received','cash_received','bank_received','ticket_refund','travel_refund') OR EXISTS(SELECT 1 FROM entries WHERE id=COALESCE(NEW.linked_entry_id,NEW.bill_id) AND cat IN ('payment_paid','cash_paid','bank_paid','payment_received','cash_received','bank_received','ticket_refund','travel_refund'))) THEN RAISE(ABORT,'Only payments or refunds can be allocated to charges') END;
           SELECT CASE WHEN COALESCE(NEW.linked_entry_id,NEW.bill_id) IS NOT NULL AND NEW.debit+NEW.credit+COALESCE((SELECT SUM(debit+credit) FROM entries WHERE agency_id=NEW.agency_id AND account_id=NEW.account_id AND deleted=0 AND (linked_entry_id=COALESCE(NEW.linked_entry_id,NEW.bill_id) OR bill_id=COALESCE(NEW.linked_entry_id,NEW.bill_id))),0)>(SELECT MAX(debit,credit) FROM entries WHERE id=COALESCE(NEW.linked_entry_id,NEW.bill_id)) THEN RAISE(ABORT,'Payment exceeds remaining reference amount') END;
         END;
         CREATE TRIGGER IF NOT EXISTS entry_immutable BEFORE UPDATE ON entries WHEN NEW.agency_id IS NOT OLD.agency_id OR NEW.account_id IS NOT OLD.account_id OR NEW.debit IS NOT OLD.debit OR NEW.credit IS NOT OLD.credit OR NEW.edate IS NOT OLD.edate OR NEW.cat IS NOT OLD.cat OR NEW.ref IS NOT OLD.ref OR NEW.note IS NOT OLD.note OR NEW.bill_id IS NOT OLD.bill_id OR NEW.linked_entry_id IS NOT OLD.linked_entry_id OR NEW.request_key IS NOT OLD.request_key OR NEW.deleted NOT IN (0,1) OR NEW.deleted<OLD.deleted BEGIN SELECT RAISE(ABORT,'Financial history is immutable'); END;
@@ -66,6 +66,27 @@ function migrateChatSupport(PDO $p):void {
           UPDATE chat_threads SET unread_master=MAX(0,unread_master-CASE WHEN NEW.from_master=0 THEN 1 ELSE 0 END),unread_agent=MAX(0,unread_agent-CASE WHEN NEW.from_master=1 THEN 1 ELSE 0 END) WHERE agency_id=NEW.agency_id;
         END;
         PRAGMA user_version=7;");
+        $p->exec('COMMIT');
+    }catch(Throwable $ex){$p->exec('ROLLBACK');throw $ex;}
+}
+function migrateLedgerCurrency(PDO $p):void{
+    if((int)$p->query('PRAGMA user_version')->fetchColumn()>=8)return;
+    $p->exec('BEGIN IMMEDIATE');
+    try{
+        if((int)$p->query('PRAGMA user_version')->fetchColumn()>=8){$p->exec('COMMIT');return;}
+        $columns=array_column($p->query('PRAGMA table_info(entries)')->fetchAll(),'name');
+        if(!in_array('currency',$columns,true))$p->exec("ALTER TABLE entries ADD COLUMN currency TEXT NOT NULL DEFAULT 'PKR' CHECK(length(currency)=3)");
+        if(!in_array('fx_rate',$columns,true))$p->exec('ALTER TABLE entries ADD COLUMN fx_rate INTEGER NOT NULL DEFAULT 1000000 CHECK(fx_rate>0 AND fx_rate<=100000000000)');
+        if(!in_array('foreign_amount',$columns,true))$p->exec('ALTER TABLE entries ADD COLUMN foreign_amount INTEGER NOT NULL DEFAULT 0 CHECK(foreign_amount>=0 AND foreign_amount<=9999999999999)');
+        $p->exec('UPDATE entries SET foreign_amount=debit+credit WHERE foreign_amount=0');
+        $p->exec('DROP TRIGGER IF EXISTS entry_immutable; DROP TRIGGER IF EXISTS entry_category_guard;');
+        $dr=implode(',',array_map([$p,'quote'],array_merge(array_keys(DEBIT_CATS),['commission_earned'])));
+        $cr=implode(',',array_map([$p,'quote'],array_merge(array_keys(CREDIT_CATS),['expense_paid'])));
+        $currencies=implode(',',array_map([$p,'quote'],LEDGER_CURRENCY_CODES));
+        $fxCheck='CAST(NEW.foreign_amount/1000000 AS INTEGER)*NEW.fx_rate+CAST(((NEW.foreign_amount%1000000)*NEW.fx_rate+500000)/1000000 AS INTEGER)';
+        $p->exec("CREATE TRIGGER entry_immutable BEFORE UPDATE ON entries WHEN NEW.agency_id IS NOT OLD.agency_id OR NEW.account_id IS NOT OLD.account_id OR NEW.debit IS NOT OLD.debit OR NEW.credit IS NOT OLD.credit OR NEW.edate IS NOT OLD.edate OR NEW.cat IS NOT OLD.cat OR NEW.ref IS NOT OLD.ref OR NEW.note IS NOT OLD.note OR NEW.bill_id IS NOT OLD.bill_id OR NEW.linked_entry_id IS NOT OLD.linked_entry_id OR NEW.request_key IS NOT OLD.request_key OR NEW.currency IS NOT OLD.currency OR NEW.fx_rate IS NOT OLD.fx_rate OR NEW.foreign_amount IS NOT OLD.foreign_amount OR NEW.deleted NOT IN (0,1) OR NEW.deleted<OLD.deleted BEGIN SELECT RAISE(ABORT,'Financial history is immutable'); END;
+        CREATE TRIGGER entry_category_guard BEFORE INSERT ON entries WHEN (NEW.debit>0 AND NEW.cat NOT IN ($dr)) OR (NEW.credit>0 AND NEW.cat NOT IN ($cr)) OR NEW.fx_rate<=0 OR NEW.fx_rate>100000000000 OR NEW.foreign_amount<=0 OR NEW.foreign_amount>9999999999999 OR NEW.currency NOT IN ($currencies) OR (NEW.currency='PKR' AND (NEW.fx_rate!=1000000 OR NEW.foreign_amount!=NEW.debit+NEW.credit)) OR NEW.debit+NEW.credit!=($fxCheck) BEGIN SELECT RAISE(ABORT,'Invalid currency conversion, rate, amount or category direction'); END;
+        PRAGMA user_version=8;");
         $p->exec('COMMIT');
     }catch(Throwable $ex){$p->exec('ROLLBACK');throw $ex;}
 }

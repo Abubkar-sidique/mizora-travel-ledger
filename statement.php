@@ -11,9 +11,10 @@ function statementData(array $account,int $agency,string $from,string $to,int $o
  $where='account_id=? AND agency_id=? AND deleted=0';$params=[(int)$account['id'],$agency];
  if($from!==''){$where.=' AND edate>=?';$params[]=$from;}if($to!==''){$where.=' AND edate<=?';$params[]=$to;}
  $rows=[];$months=[];$categories=[];$running=$opening;$debit=0;$credit=0;
- foreach(q("SELECT id,edate,cat,ref,note,debit,credit FROM entries WHERE $where ORDER BY edate,id",$params) as $entry){
+ foreach(q("SELECT id,edate,cat,ref,note,debit,credit,currency,fx_rate,foreign_amount FROM entries WHERE $where ORDER BY edate,id",$params) as $entry){
   $d=(int)$entry['debit'];$c=(int)$entry['credit'];$running+=$d-$c;$debit+=$d;$credit+=$c;$category=statementCategory((string)$entry['cat']);
-  $rows[]=['id'=>(int)$entry['id'],'date'=>$entry['edate'],'category'=>$category['label'],'tone'=>$category['tone'],'reference'=>(string)$entry['ref'],'description'=>(string)$entry['note'],'debit'=>$d,'credit'=>$c,'balance'=>$running];
+  $description=(string)$entry['note'];if((string)$entry['currency']!=='PKR')$description.=($description!==''?' · ':'').(string)$entry['currency'].' '.m((int)$entry['foreign_amount']).' @ '.ledgerFxRateText((int)$entry['fx_rate']).' PKR = PKR '.m($d+$c);
+  $rows[]=['id'=>(int)$entry['id'],'date'=>$entry['edate'],'category'=>$category['label'],'tone'=>$category['tone'],'reference'=>(string)$entry['ref'],'description'=>$description,'debit'=>$d,'credit'=>$c,'balance'=>$running];
   $month=substr($entry['edate'],0,7);if(!isset($months[$month]))$months[$month]=['label'=>date('M y',strtotime($month.'-01')),'debit'=>0,'credit'=>0,'balance'=>$running];
   $months[$month]['debit']+=$d;$months[$month]['credit']+=$c;$months[$month]['balance']=$running;
   $categories[$category['label']]=($categories[$category['label']]??0)+1;
