@@ -2,7 +2,7 @@
 
 The required production target is Hostinger Web/Cloud shared hosting with MariaDB. Do not use the earlier VPS/SQLite workflow for this deployment.
 
-Start with [hostinger-shared.md](hostinger-shared.md). The current app supports SQLite for local development and the MariaDB adapter for shared hosting. A production migration must use a version 7 SQLite source and a new, empty MariaDB database. The importer is [migrate-sqlite-to-mariadb.php](migrate-sqlite-to-mariadb.php); it runs offline, writes only to the configured MariaDB destination, and leaves SQLite unchanged. Review its preflight report and verify the target before any owner-approved cutover.
+Start with [hostinger-shared.md](hostinger-shared.md). The current app supports SQLite for local development and the MariaDB adapter for shared hosting. A production migration must use a version 8 SQLite source and a new, empty MariaDB database. The importer is [migrate-sqlite-to-mariadb.php](migrate-sqlite-to-mariadb.php); it runs offline, writes only to the configured MariaDB destination, and leaves SQLite unchanged. Review its preflight report and verify the target before any owner-approved cutover.
 
 ## Release package
 

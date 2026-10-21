@@ -107,7 +107,7 @@ try {
     if([int64]$allocated -gt 10000){throw 'Concurrent MariaDB allocations exceeded the source charge'}
     Write-Output 'PASS MariaDB concurrent allocation race: one concurrent payment accepted, one rejected, no over-allocation.'
 
-    $chrome=Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe';if(Test-Path $chrome){$profile=Join-Path $tempRoot 'chrome-profile';& node (Join-Path $PSScriptRoot 'browser-smoke.mjs') $script:base $chrome $profile;if($LASTEXITCODE -ne 0){throw 'MariaDB browser smoke failed'}}else{Write-Output 'SKIP MariaDB browser smoke: Chrome not found.'}
+    $chrome=Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe';if(Test-Path $chrome){$browser=Join-Path $PSScriptRoot 'browser-smoke.mjs';$profile=Join-Path $tempRoot 'chrome-profile';& node $browser $script:base $chrome $profile;if($LASTEXITCODE -ne 0){throw 'MariaDB browser smoke failed'};& node $browser $script:base $chrome (Join-Path $tempRoot 'chrome-master-profile') master Audit-Only-Owner-Password-731;if($LASTEXITCODE -ne 0){throw 'MariaDB master browser smoke failed'}}else{Write-Output 'SKIP MariaDB browser smoke: Chrome not found.'}
 
     $master=Login 'audit.master';$snapshotPath=Join-Path $tempRoot 'pre-backup-snapshot.json';& $php (Join-Path $PSScriptRoot 'verify-mariadb-restore.php') $dbName --save $snapshotPath;if($LASTEXITCODE -ne 0){throw 'Could not capture pre-backup snapshot'};Invoke-WebRequest -Uri ($script:base+'?p=backup&download=1') -WebSession $master -OutFile $backupPath -TimeoutSec 30
     $dump=[IO.File]::ReadAllText($backupPath)

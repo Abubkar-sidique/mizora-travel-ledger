@@ -3,19 +3,23 @@ declare(strict_types=1);
 if(PHP_SAPI!=='cli'){http_response_code(404);exit;}
 require_once __DIR__.'/../ledger/database.php';
 require_once __DIR__.'/../ledger/schema-mariadb.php';
+require_once __DIR__.'/../ledger/accounting.php';
 
 function failImport(string $message):never{fwrite(STDERR,"NO-GO: $message\n");exit(1);}
 function tableNames(SQLite3 $source):array{$r=$source->query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name");$out=[];while($x=$r->fetchArray(SQLITE3_ASSOC))$out[]=$x['name'];return $out;}
 function columns(SQLite3 $source,string $table):array{$sql="PRAGMA table_info(\"".str_replace('"','""',$table)."\")";$r=$source->query($sql);$out=[];while($x=$r->fetchArray(SQLITE3_ASSOC))$out[]=$x['name'];return $out;}
 function scalar(SQLite3 $source,string $sql):int{return (int)$source->querySingle($sql);}
 function validateFinancialSource(SQLite3 $s):void{
-    $debit="'ticket_sold','umrah_sold','visa_sold','hotel_sold','transport_sold','tour_sold','payment_paid','cash_paid','bank_paid','other_debit'";
-    $credit="'ticket_bought','umrah_bought','visa_bought','hotel_bought','transport_bought','tour_bought','payment_received','cash_received','bank_received','ticket_refund','travel_refund','adjustment','other_credit'";
-    $payments="'payment_paid','cash_paid','bank_paid','payment_received','cash_received','bank_received'";
+    $debit="'ticket_sold','umrah_sold','visa_sold','hotel_sold','transport_sold','tour_sold','commission_earned','cash_transfer_in','payment_paid','cash_paid','bank_paid','other_debit'";
+    $credit="'ticket_bought','umrah_bought','visa_bought','hotel_bought','transport_bought','tour_bought','payment_received','cash_received','bank_received','cash_transfer_out','expense_paid','ticket_refund','travel_refund','adjustment','other_credit'";
+    $payments="'payment_paid','cash_paid','bank_paid','payment_received','cash_received','bank_received','ticket_refund','travel_refund'";
+    $currencies=implode(',',array_map(static fn(string $code)=>"'".$s->escapeString($code)."'",LEDGER_CURRENCY_CODES));
+    $converted='(CAST(foreign_amount/1000000 AS INTEGER)*fx_rate+CAST(((foreign_amount%1000000)*fx_rate+500000)/1000000 AS INTEGER))';
     $checks=[
         "SELECT COUNT(*) FROM entries WHERE debit<0 OR credit<0 OR debit>9999999999999 OR credit>9999999999999 OR ((debit=0)=(credit=0))",
         "SELECT COUNT(*) FROM entries WHERE (debit>0 AND cat NOT IN ($debit)) OR (credit>0 AND cat NOT IN ($credit))",
-        "SELECT COUNT(*) FROM entries x LEFT JOIN entries s ON s.id=COALESCE(x.linked_entry_id,x.bill_id) WHERE COALESCE(x.linked_entry_id,x.bill_id) IS NOT NULL AND (s.id IS NULL OR s.agency_id!=x.agency_id OR s.account_id!=x.account_id OR s.deleted!=0 OR (x.debit>0 AND s.credit=0) OR (x.credit>0 AND s.debit=0) OR x.cat NOT IN ($payments) OR s.cat IN ($payments) OR (x.linked_entry_id IS NOT NULL AND x.bill_id IS NOT NULL AND x.linked_entry_id!=x.bill_id))",
+        "SELECT COUNT(*) FROM entries WHERE currency NOT IN ($currencies) OR fx_rate<=0 OR fx_rate>100000000000 OR foreign_amount<=0 OR foreign_amount>9999999999999 OR (currency='PKR' AND (fx_rate!=1000000 OR foreign_amount!=debit+credit)) OR (currency!='PKR' AND debit+credit!=$converted)",
+        "SELECT COUNT(*) FROM entries x LEFT JOIN entries s ON s.id=COALESCE(x.linked_entry_id,x.bill_id) WHERE COALESCE(x.linked_entry_id,x.bill_id) IS NOT NULL AND (s.id IS NULL OR s.agency_id!=x.agency_id OR s.account_id!=x.account_id OR s.deleted!=0 OR (x.debit>0 AND s.credit=0) OR (x.credit>0 AND s.debit=0) OR x.cat NOT IN ($payments) OR s.cat IN ($payments) OR (x.cat IN ('ticket_refund','travel_refund') AND (x.credit=0 OR s.debit=0)) OR (x.linked_entry_id IS NOT NULL AND x.bill_id IS NOT NULL AND x.linked_entry_id!=x.bill_id))",
         "SELECT COUNT(*) FROM entries s WHERE (s.debit>0 OR s.credit>0) AND (SELECT COALESCE(SUM(p.debit+p.credit),0) FROM entries p WHERE p.agency_id=s.agency_id AND p.account_id=s.account_id AND p.deleted=0 AND (p.linked_entry_id=s.id OR (p.bill_id=s.id AND (p.linked_entry_id IS NULL OR p.linked_entry_id!=p.bill_id))))>MAX(s.debit,s.credit)",
         "SELECT COUNT(*) FROM entries s WHERE s.deleted=1 AND EXISTS(SELECT 1 FROM entries p WHERE p.agency_id=s.agency_id AND p.account_id=s.account_id AND p.deleted=0 AND (p.linked_entry_id=s.id OR p.bill_id=s.id))",
     ];
@@ -39,11 +43,11 @@ $args=[];foreach(array_slice($argv,1) as $arg){if(str_starts_with($arg,'--source
 if(empty($args['source'])||empty($args['confirm']))failImport('Explicit source path and --confirm-empty-target are required');
 $sourcePath=realpath($args['source']);if(!$sourcePath||!is_file($sourcePath))failImport('Source SQLite file does not exist');
 $source=new SQLite3($sourcePath,SQLITE3_OPEN_READONLY);$source->busyTimeout(10000);$source->exec('PRAGMA query_only=ON');
-if((int)$source->querySingle('PRAGMA user_version')<7)failImport('Source schema must first be migrated to SQLite schema version 7 using the existing offline SQLite migration procedure');
+if((int)$source->querySingle('PRAGMA user_version')<8)failImport('Source schema must first be migrated to SQLite schema version 8 using the existing offline SQLite migration procedure');
 $fk=$source->query('PRAGMA foreign_key_check');if($fk->fetchArray())failImport('Source SQLite database has a foreign-key violation');
 if($source->querySingle('PRAGMA integrity_check')!=='ok')failImport('Source SQLite integrity check failed');validateFinancialSource($source);
 $required=['agencies','users','accounts','entries','audit_log','login_limits','chat_presence','chat_messages','chat_threads'];$sourceTables=tableNames($source);foreach($required as $t)if(!in_array($t,$sourceTables,true))failImport("Source schema is missing $t");
-$target=connectLedgerDatabase();$target->setAttribute(PDO::ATTR_TIMEOUT,10);installMariaSchema($target,false);$target->beginTransaction();$target->query('SELECT version FROM ledger_schema WHERE version=1 FOR UPDATE')->fetch();
+$target=connectLedgerDatabase();$target->setAttribute(PDO::ATTR_TIMEOUT,10);installMariaSchema($target,false);upgradeMariaSchemaV2($target);$target->beginTransaction();$target->query('SELECT version FROM ledger_schema WHERE version=2 FOR UPDATE')->fetch();
 $targetTables=$required;
 foreach($targetTables as $t){$n=(int)$target->query('SELECT COUNT(*) FROM `'.$t.'`')->fetchColumn();if($n!==0)failImport("Target table $t is not empty; refusing overwrite");}
 $source->exec('BEGIN');$beforeCounts=expectedCounts($source,$required);$beforeBalances=sourceBalances($source);

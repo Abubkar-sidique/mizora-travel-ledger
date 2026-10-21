@@ -191,10 +191,16 @@ document.querySelectorAll('[data-print]').forEach(function(button){button.addEve
 // Debit/Credit category options and reference matching for payments.
 (function(){
  const form=document.querySelector('[data-ledger-entry]');if(!form)return;
- const category=form.querySelector('#entry-category'),linked=form.querySelector('#linked-entry'),refField=form.querySelector('#reference-field'),amount=form.querySelector('#entry-amount'),hint=form.querySelector('#linked-due-note');
+ const category=form.querySelector('#entry-category'),linked=form.querySelector('#linked-entry'),refField=form.querySelector('#reference-field'),amount=form.querySelector('#entry-amount'),hint=form.querySelector('#linked-due-note'),currency=form.querySelector('[name="currency"]');
+ const wordHint=document.createElement('small');wordHint.className='field-hint';wordHint.id='amount-in-words';wordHint.setAttribute('aria-live','polite');amount.insertAdjacentElement('afterend',wordHint);
+ const ones=['Zero','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'],tens=['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
+ function underThousand(n){const out=[];if(n>=100){out.push(ones[Math.floor(n/100)]+' Hundred');n%=100;}if(n>=20){out.push(tens[Math.floor(n/10)]);n%=10;}if(n)out.push(ones[n]);return out.join(' ');}
+ function amountWords(){const value=Number(amount.value);if(!Number.isFinite(value)||value<=0){wordHint.textContent='Amount in words will appear here';return;}let n=Math.floor(value),parts=[];for(const [size,label] of [[10000000,'Crore'],[100000,'Lakh'],[1000,'Thousand']]){if(n>=size){const group=Math.floor(n/size);parts.push(underThousand(group)+' '+label);n%=size;}}if(n)parts.push(underThousand(n));const unit=currency.value==='PKR'?'rupees':currency.value;const paisa=currency.value==='PKR'?Math.round((value-Math.floor(value))*100):0;wordHint.textContent=parts.join(' ')+(paisa?' and '+underThousand(paisa)+' paisa':'')+' '+unit+' only';}
+ amount.addEventListener('input',amountWords);currency.addEventListener('change',amountWords);amountWords();
  const cats=Object.fromEntries(Object.entries(JSON.parse(form.dataset.entryCategories)).map(([side,options])=>[side,Object.entries(options)]));
  function side(){return form.querySelector('input[name="type"]:checked')?.value==='cr'?'cr':'dr';}
- function payment(){return ['payment_paid','cash_paid','bank_paid','payment_received','cash_received','bank_received'].includes(category.value);}
+ function payment(){return ['payment_paid','cash_paid','bank_paid','payment_received','cash_received','bank_received','ticket_refund','travel_refund'].includes(category.value);}
+ function refund(){return ['ticket_refund','travel_refund'].includes(category.value);}
  function due(){const opt=linked.selectedOptions[0];if(opt&&opt.dataset.due){amount.max=opt.dataset.due;hint.textContent='Remaining on selected reference: PKR '+Number(opt.dataset.due).toLocaleString('en-PK',{minimumFractionDigits:2,maximumFractionDigits:2});}else{amount.removeAttribute('max');hint.textContent='General payment: leave reference empty if payment is not against a specific ticket.';}}
  const search=form.querySelector('#reference-search');let referenceRequest=null,searchTimer=null;
  async function loadReferences(){
@@ -202,13 +208,13 @@ document.querySelectorAll('[data-print]').forEach(function(button){button.addEve
   linked.disabled=true;linked.value='';amount.removeAttribute('max');hint.textContent='Loading references…';form.dataset.referencesLoading='1';
   try{const url=new URL(location.href);url.search='';url.searchParams.set('p','references');url.searchParams.set('id',form.elements.account_id.value);url.searchParams.set('side',side());url.searchParams.set('s',search.value.trim());
    const response=await fetch(url,{signal:controller.signal,headers:{Accept:'application/json'}});if(!response.ok)throw Error('Unable to load references');const data=await response.json();
-   if(controller!==referenceRequest||!payment())return;linked.replaceChildren(new Option('General payment (no reference)',''));
+   if(controller!==referenceRequest||!payment())return;linked.replaceChildren(new Option(refund()?'General refund (no reference)':'General payment (no reference)',''));
    data.items.forEach(item=>{const option=new Option(item.label,String(item.id));option.dataset.due=item.due;linked.add(option);});
-   hint.textContent=data.more?'Showing 50 references. Search PNR or entry number for older items.':(data.items.length?'Choose a reference, or leave as general payment.':'No unpaid references match. You can record a general payment.');
-  }catch(error){if(error.name!=='AbortError'){linked.replaceChildren(new Option('General payment (no reference)',''));hint.textContent='References could not load. Change category to retry, or use a general payment.';}}
+   hint.textContent=data.more?'Showing 50 references. Search PNR or entry number for older items.':(data.items.length?(refund()?'Choose the original sale to link this refund.':'Choose a reference, or leave as general payment.'):(refund()?'No refundable balance matches.':'No unpaid references match. You can record a general payment.'));
+  }catch(error){if(error.name!=='AbortError'){linked.replaceChildren(new Option(refund()?'General refund (no reference)':'General payment (no reference)',''));hint.textContent='References could not load. Change category to retry, or leave this transaction unlinked.';}}
   finally{if(controller===referenceRequest){linked.disabled=!payment();delete form.dataset.referencesLoading;}}
  }
- function syncLink(){const show=payment();refField.hidden=!show;linked.disabled=!show;linked.replaceChildren(new Option('General payment (no reference)',''));amount.removeAttribute('max');if(!show){if(referenceRequest)referenceRequest.abort();return;}search.value='';loadReferences();}
+ function syncLink(){const show=payment();refField.hidden=!show;linked.disabled=!show;linked.replaceChildren(new Option(refund()?'General refund (no reference)':'General payment (no reference)',''));refField.querySelector('.reference-title').textContent=refund()?'Refund Against':'Payment Against';amount.removeAttribute('max');if(!show){if(referenceRequest)referenceRequest.abort();return;}search.value='';loadReferences();}
  search.addEventListener('input',function(){clearTimeout(searchTimer);searchTimer=setTimeout(loadReferences,250);});
  search.addEventListener('keydown',function(event){if(event.key==='Enter'){event.preventDefault();clearTimeout(searchTimer);loadReferences();}});
  function syncSide(){const prev=category.value;category.replaceChildren(...cats[side()].map(([value,text])=>new Option(text,value)));if(cats[side()].some(x=>x[0]===prev))category.value=prev;syncLink();}
@@ -343,6 +349,15 @@ document.querySelectorAll('[data-print]').forEach(function(button){button.addEve
  if(form){form.querySelectorAll('[name="type"]').forEach(radio=>radio.addEventListener('change',syncEntry));syncEntry();}
  dialog.querySelector('[data-close-entry],[data-close-drawer]').addEventListener('click',()=>dialog.close());
  dialog.addEventListener('click',function(event){if(event.target!==dialog)return;const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)dialog.close();});
+})();
+
+// Foreign entries use a manually confirmed PKR-per-unit rate; never guess one.
+(function(){
+ const form=document.querySelector('[data-ledger-entry]');if(!form)return;
+ const currency=form.querySelector('[name="currency"]'),rate=form.querySelector('[name="fx_rate"]'),label=form.querySelector('[data-currency-label]'),hint=form.querySelector('#fx-rate-hint');
+ if(!currency||!rate)return;
+ let previous=currency.value;function syncCurrency(){const code=currency.value;label.textContent=code;if(code==='PKR'){rate.value='1.000000';rate.readOnly=true;hint.textContent='PKR is fixed at 1.';}else{if(code!==previous)rate.value='';rate.readOnly=false;hint.textContent='Enter the agreed PKR value for one '+code+'. The app does not fetch live rates.';}previous=code;}
+ currency.addEventListener('change',syncCurrency);syncCurrency();
 })();
 // Direct support is available before and after sign-in; no ticket or message is sent automatically.
 (()=>{const dialog=document.getElementById('support-dialog');if(!dialog)return;

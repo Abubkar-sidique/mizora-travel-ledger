@@ -68,7 +68,7 @@ try {
     $owner1 = New-Object Microsoft.PowerShell.Commands.WebRequestSession
     $response = Invoke-Get $owner1 '?p=login'; $token = Get-Csrf $response.Content
     $null = Invoke-Post $owner1 '?p=login' @{ t=$token; username='audit.owner1'; password='Audit-Only-Owner-Password-731' }
-    foreach ($page in @('?p=home', '?p=accounts', '?p=reports', '?p=profile')) { Assert-That ((Invoke-Get $owner1 $page).StatusCode -eq 200) "Owner page loads: $page" }
+    foreach ($page in @('?p=home', '?p=accounts', '?p=reports', '?p=audit', '?p=profile')) { Assert-That ((Invoke-Get $owner1 $page).StatusCode -eq 200) "Owner page loads: $page" }
 
     $response = Invoke-Get $owner1 '?p=accounts'; $token = Get-Csrf $response.Content
     $null = Invoke-Post $owner1 '?p=accounts' @{ t=$token; act='acc'; name='Audit <img src=x onerror=alert(1)>'; phone=''; kind='customer'; opening='25.00'; opening_side='dr' }
@@ -87,6 +87,8 @@ try {
     Assert-That ([bool]$account2) 'Agency two account was created'
     $crossTenant = Invoke-Get $owner1 "?p=acc&id=$account2"
     Assert-That ($crossTenant.Content -notmatch 'Private Agency Two') 'Tenant cannot view another agency account'
+    $ownerAudit = Invoke-Get $owner1 '?p=audit'
+    Assert-That ($ownerAudit.Content -match 'Activity Log' -and $ownerAudit.Content -notmatch ">account #$account2<") 'Activity log is available and hides another agency account records'
 
     $chromePath = Join-Path $env:ProgramFiles 'Google/Chrome/Application/chrome.exe'
     if (Test-Path -LiteralPath $chromePath) {
@@ -94,6 +96,8 @@ try {
         $browserProfile = Join-Path $tempRoot 'chrome-profile'
         & (Get-Command node).Source $browserScript $script:base $chromePath $browserProfile
         if ($LASTEXITCODE -ne 0) { throw 'Headless Chrome browser smoke failed' }
+        & (Get-Command node).Source $browserScript $script:base $chromePath (Join-Path $tempRoot 'chrome-master-profile') master
+        if ($LASTEXITCODE -ne 0) { throw 'Headless Chrome master browser smoke failed' }
     } else { Write-Output 'SKIP browser smoke: Chrome executable is not installed.' }
 
     $response = Invoke-Get $owner1 "?p=acc&id=$account1"
@@ -130,6 +134,47 @@ try {
     $zip = [IO.Compression.ZipFile]::OpenRead($xlsxPath)
     try { Assert-That ([bool]$zip.GetEntry('xl/worksheets/sheet1.xml')) 'Excel export is a readable XLSX archive' } finally { $zip.Dispose() }
 
+    $response = Invoke-Get $owner1 '?p=accounts'; $token = Get-Csrf $response.Content
+    $null = Invoke-Post $owner1 '?p=accounts' @{ t=$token; act='acc'; name='Operating Bank'; phone=''; kind='bank'; opening='500.00'; opening_side='dr' }
+    $response = Invoke-Get $owner1 '?p=accounts'; $token = Get-Csrf $response.Content
+    $null = Invoke-Post $owner1 '?p=accounts' @{ t=$token; act='acc'; name='Cash Drawer'; phone=''; kind='cash'; opening='0'; opening_side='dr' }
+    $response = Invoke-Get $owner1 '?p=accounts'
+    Assert-That ($response.Content -match 'Bank' -and $response.Content -match 'Cash') 'Dedicated cash/bank ledger account types can be created'
+    $cashAccount = [regex]::Match($response.Content, 'href="\?p=acc&id=(\d+)"').Groups[1].Value
+    $transferIds = (& $php (Join-Path $PSScriptRoot 'list-cash-bank-ids.php') $database).Split('|')
+    Assert-That ($transferIds.Count -eq 2) 'Cash/bank transfer test has two tenant-owned accounts'
+    $cashAccount = $transferIds[0]
+    $response = Invoke-Get $owner1 '?p=accounts'; $token = Get-Csrf $response.Content
+    $transferKey = [regex]::Match($response.Content, 'name="request_key" value="([a-f0-9]{48})"').Groups[1].Value
+    $null = Invoke-Post $owner1 '?p=accounts' @{ t=$token; request_key=$transferKey; act='transfer'; from_account_id=$transferIds[0]; to_account_id=$transferIds[1]; amount='125.50'; edate='2026-10-18'; note='Till deposit' }
+    $fromLedger = Invoke-Get $owner1 "?p=acc&id=$($transferIds[0])"; $toLedger = Invoke-Get $owner1 "?p=acc&id=$($transferIds[1])"
+    Assert-That ($fromLedger.Content -match 'TRF-' -and $toLedger.Content -match 'TRF-' -and $fromLedger.Content -match '125\.50' -and $toLedger.Content -match '125\.50') 'Cash/bank transfers create matching entries in both ledgers'
+    $response = Invoke-Get $owner1 "?p=acc&id=$cashAccount"; $token=Get-Csrf $response.Content; $key=Get-RequestKey $response.Content
+    $null = Invoke-Post $owner1 "?p=acc&id=$cashAccount" @{ t=$token; request_key=$key; act='ent'; account_id=$cashAccount; type='dr'; cat='ticket_sold'; amount='100.00'; edate='2026-10-18'; note='Refund regression ticket'; ref='RFD-1' }
+    $references = (Invoke-Get $owner1 "?p=references&id=$cashAccount&side=cr&s=RFD-1").Content | ConvertFrom-Json
+    $sourceEntry = $references.items | Where-Object { $_.label -match 'RFD-1' } | Select-Object -First 1
+    Assert-That ([bool]$sourceEntry) 'Original sale is searchable for linking a refund'
+    $response = Invoke-Get $owner1 "?p=acc&id=$cashAccount"; $token=Get-Csrf $response.Content; $key=Get-RequestKey $response.Content
+    $refundResponse = Invoke-Post $owner1 "?p=acc&id=$cashAccount" @{ t=$token; request_key=$key; act='ent'; account_id=$cashAccount; type='cr'; cat='ticket_refund'; amount='25.00'; edate='2026-10-18'; note='Partial ticket refund'; ref='RFD-CR-1'; linked_entry_id=$sourceEntry.id }
+    if ($refundResponse.Content -match 'exceeds remaining amount|Unable to save|Invalid original') { throw "Refund posting rejected: $(($refundResponse.Content | Select-String -Pattern 'exceeds remaining amount|Unable to save|Invalid original' -AllMatches).Matches.Value -join '; ')" }
+    $response = Invoke-Get $owner1 "?p=acc&id=$cashAccount"
+    Assert-That ($response.Content -match 'Against entry #') 'Ticket refund is retained as a traceable linked entry'
+    $token=Get-Csrf $response.Content; $key=Get-RequestKey $response.Content
+    $overRefund = Invoke-Post $owner1 "?p=acc&id=$cashAccount" @{ t=$token; request_key=$key; act='ent'; account_id=$cashAccount; type='cr'; cat='ticket_refund'; amount='80.00'; edate='2026-10-18'; note='Excess refund blocked'; ref='RFD-OVER'; linked_entry_id=$sourceEntry.id }
+    Assert-That ($overRefund.Content -match 'Refund exceeds remaining amount') 'Linked refund cannot exceed the original sale after prior allocations'
+    $response = Invoke-Get $owner1 "?p=acc&id=$cashAccount"; $token=Get-Csrf $response.Content; $key=Get-RequestKey $response.Content
+    $null = Invoke-Post $owner1 "?p=acc&id=$cashAccount" @{ t=$token; request_key=$key; act='ent'; account_id=$cashAccount; type='dr'; cat='commission_earned'; amount='100.00'; edate='2026-10-18'; note='Supplier commission'; ref='COMM-1' }
+    $response = Invoke-Get $owner1 "?p=acc&id=$cashAccount"; $token=Get-Csrf $response.Content; $key=Get-RequestKey $response.Content
+    $null = Invoke-Post $owner1 "?p=acc&id=$cashAccount" @{ t=$token; request_key=$key; act='ent'; account_id=$cashAccount; type='cr'; cat='expense_paid'; amount='35.00'; edate='2026-10-18'; note='Office expense'; ref='EXP-1' }
+    $response = Invoke-Get $owner1 "?p=acc&id=$cashAccount"; $token=Get-Csrf $response.Content; $key=Get-RequestKey $response.Content
+    $null = Invoke-Post $owner1 "?p=acc&id=$cashAccount" @{ t=$token; request_key=$key; act='ent'; account_id=$cashAccount; type='dr'; cat='ticket_sold'; amount='100.00'; currency='USD'; fx_rate='280.500000'; edate='2026-10-18'; note='Foreign currency ticket'; ref='FX-1' }
+    $response = Invoke-Get $owner1 "?p=acc&id=$cashAccount"
+    Assert-That ($response.Content -match 'USD 100\.00' -and $response.Content -match 'PKR 28,050\.00') 'Foreign sale stores the original amount and posts its fixed-point PKR equivalent'
+    $csvFx = Invoke-Get $owner1 "?p=acc&id=$cashAccount&csv=1"
+    Assert-That ($csvFx.Content -match 'USD 100\.00 @ 280\.5 PKR = PKR 28,050\.00') 'Statement export preserves the original currency and applied rate'
+    $report = Invoke-Get $owner1 '?p=reports&y=2026'
+    Assert-That ($report.Content -match 'Service Margin Estimate' -and $report.Content -match 'PKR 28,290\.00' -and $report.Content -match 'Management estimate') 'Service margin includes converted foreign sale, linked refund, commission and expense amounts and labels the estimate limitation'
+
     try {
         $null = Invoke-Post $owner1 "?p=acc&id=$account1" @{ act='delacc'; id=$account1 }
         throw 'POST without a CSRF token unexpectedly succeeded'
@@ -154,7 +199,7 @@ try {
     $restoreResult = & $php $manage restore-check "--backup=$managedBackup" "--destination=$restoredDatabase" "--public=$ledgerRoot"
     Assert-That ($LASTEXITCODE -eq 0 -and $restoreResult -match 'PASS restored') 'Restore-check verifies integrity, foreign keys, checksum and rows'
 
-    Write-Output 'PASS HTTP smoke: setup, authentication, tenant isolation, page routes, XSS, CSRF, debit/credit, allocation, CSV, print, XLSX, online backup, CLI backup and verified restore.'
+    Write-Output 'PASS HTTP smoke: setup, authentication, tenant isolation, activity log, cash/bank ledgers, foreign currency conversion/export, travel margin estimate, XSS, CSRF, debit/credit, allocation, CSV, print, XLSX, online backup, CLI backup and verified restore.'
 }
 finally {
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force }

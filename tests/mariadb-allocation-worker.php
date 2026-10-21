@@ -9,4 +9,4 @@ $source=$pdo->prepare('SELECT debit,credit FROM entries WHERE id=? AND agency_id
 $sum=$pdo->query('SELECT COALESCE(SUM(debit+credit),0) FROM entries WHERE agency_id=1 AND account_id=1 AND deleted=0 AND (linked_entry_id=1 OR bill_id=1)')->fetchColumn();
 $amount=4000;$available=max((int)$charge['debit'],(int)$charge['credit'])-(int)$sum;
 if($amount>$available){$pdo->rollBack();echo "REJECTED\n";exit(0);}
-$insert=$pdo->prepare("INSERT INTO entries(agency_id,account_id,edate,note,ref,cat,debit,credit,linked_entry_id,request_key) VALUES(1,1,'2025-04-01','Concurrency regression','CONC','payment_received',0,?,1,?)");$insert->execute([$amount,bin2hex(random_bytes(24))]);$pdo->commit();echo "ACCEPTED\n";
+$insert=$pdo->prepare("INSERT INTO entries(agency_id,account_id,edate,note,ref,cat,debit,credit,linked_entry_id,request_key,currency,fx_rate,foreign_amount) VALUES(1,1,'2025-04-01','Concurrency regression','CONC','payment_received',0,?,1,?,'PKR',1000000,?)");$insert->execute([$amount,bin2hex(random_bytes(24)),$amount]);$pdo->commit();echo "ACCEPTED\n";

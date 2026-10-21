@@ -22,7 +22,7 @@ try {
         & $php $verify $database
         if ($LASTEXITCODE -ne 0) { throw "Migration verification pass $pass failed" }
     }
-    Write-Output 'PASS offline migration from v4 to v7, preservation checks, repeat migration idempotency.'
+    Write-Output 'PASS offline migration from v4 to v8, preservation checks, repeat migration idempotency.'
 }
 finally {
     $resolved = [IO.Path]::GetFullPath($tempRoot)
